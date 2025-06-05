@@ -1,5 +1,5 @@
 use argon2::{self, Config, hash_encoded, verify_encoded};
-use std::{env, sync::Arc, vec};
+use std::{sync::Arc, vec};
 
 use axum::{
     Extension, Json, debug_handler,
@@ -69,7 +69,7 @@ pub async fn register(
 
     let hashed_password = hash_encoded(
         &payload.password.as_bytes(),
-        &state.salt().as_bytes(),
+        &state.get_salt().as_bytes(),
         &Config::default(),
     )
     .map_err(|e| ValidationError {
@@ -199,11 +199,7 @@ pub async fn login(
         let access_token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(
-                env::var("SECRET_KEY_ACCESS")
-                    .expect("No secret key is provided")
-                    .as_ref(),
-            ),
+            &EncodingKey::from_secret(state.get_access_key().as_bytes()),
         )
         .unwrap();
 
@@ -221,17 +217,13 @@ pub async fn login(
         let refresh_token = encode(
             &Header::default(),
             &claims_refresh,
-            &EncodingKey::from_secret(
-                env::var("SECRET_KEY_REFRESH")
-                    .expect("No secret key was provided")
-                    .as_ref(),
-            ),
+            &EncodingKey::from_secret(&state.get_access_key().as_bytes()),
         )
         .unwrap();
 
         let hashed_refresh_token = argon2::hash_encoded(
             refresh_token.as_bytes(),
-            &state.salt().as_bytes(),
+            &state.get_salt().as_bytes(),
             &Config::default(),
         )
         .unwrap();
@@ -308,14 +300,14 @@ pub async fn refresh(
     let matched_token = find_matching_token(&tokens, &payload.refresh_token)?;
 
     let (new_access_token, new_refresh_token, new_refresh_claims) =
-        generate_new_tokens(&user_data).await?;
+        generate_new_tokens(&user_data, &state.get_access_key().as_bytes(), &state.get_access_key().as_bytes()).await?;
 
     update_tokens_in_database(
         &state.tokens_db,
         &matched_token,
         &new_refresh_claims,
         &new_refresh_token,
-        &state.salt()
+        &state.get_salt()
     )
     .await?;
 
@@ -349,23 +341,9 @@ fn find_matching_token(
 
 async fn generate_new_tokens(
     user_data: &TokenClaims,
+    access_key: &[u8],
+    refresh_key: &[u8]
 ) -> Result<(String, String, TokenClaims), ValidationError> {
-    let access_secret = env::var("SECRET_KEY_ACCESS").map_err(|_| ValidationError {
-        error: "Configuration error".to_string(),
-        details: vec![ValidationDetail {
-            field: "configuration".to_string(),
-            messages: vec!["Access token secret not configured".to_string()],
-        }],
-    })?;
-
-    let refresh_secret = env::var("SECRET_KEY_REFRESH").map_err(|_| ValidationError {
-        error: "Configuration error".to_string(),
-        details: vec![ValidationDetail {
-            field: "configuration".to_string(),
-            messages: vec!["Refresh token secret not configured".to_string()],
-        }],
-    })?;
-
     let new_access_claims = TokenClaims {
         name: user_data.name.clone(),
         email: user_data.email.clone(),
@@ -379,7 +357,7 @@ async fn generate_new_tokens(
     let new_access_token = jsonwebtoken::encode(
         &Header::default(),
         &new_access_claims,
-        &EncodingKey::from_secret(access_secret.as_ref()),
+        &EncodingKey::from_secret(access_key),
     )
     .map_err(|e| ValidationError {
         error: "Token generation failed".to_string(),
@@ -402,7 +380,7 @@ async fn generate_new_tokens(
     let new_refresh_token = jsonwebtoken::encode(
         &Header::default(),
         &new_refresh_claims,
-        &EncodingKey::from_secret(refresh_secret.as_ref()),
+        &EncodingKey::from_secret(refresh_key),
     )
     .map_err(|e| ValidationError {
         error: "Token generation failed".to_string(),
@@ -468,7 +446,7 @@ pub async fn logout(
 ) -> Result<(), ValidationError> {
     let hashed_refresh_token = argon2::hash_encoded(
         paylod.refresh_token.as_bytes(),
-        &state.salt().as_bytes(),
+        &state.get_salt().as_bytes(),
         &Config::default(),
     )
     .map_err(|e| ValidationError {

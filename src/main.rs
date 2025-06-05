@@ -40,9 +40,17 @@ use tower_http::{
 #[tokio::main]
 async fn main() {
     let pool = connect_to_database().await;
-    let salt = env::var("SALT").expect("No salt was provided");
+    let salt = env::var("SALT").expect("Salt was not provided");
+    let access_key = env::var("SECRET_KEY_ACCESS").expect("Secret key was not provided");
+    let refresh_key = env::var("SECRET_REFRESH_ACCESS").expect("Refresh key was not provided");
 
-    let connection_db = Arc::new(AppState::new(pool.clone(), pool.clone(), salt.into()));
+    let connection_db = Arc::new(AppState::new(
+        pool.clone(),
+        pool.clone(),
+        salt.into(),
+        access_key.into(),
+        refresh_key.into(),
+    ));
 
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
