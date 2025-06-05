@@ -69,7 +69,7 @@ pub async fn register(
 
     let hashed_password = hash_encoded(
         &payload.password.as_bytes(),
-        &state.salt.as_bytes(),
+        &state.salt().as_bytes(),
         &Config::default(),
     )
     .map_err(|e| ValidationError {
@@ -231,7 +231,7 @@ pub async fn login(
 
         let hashed_refresh_token = argon2::hash_encoded(
             refresh_token.as_bytes(),
-            &state.salt.as_bytes(),
+            &state.salt().as_bytes(),
             &Config::default(),
         )
         .unwrap();
@@ -315,7 +315,7 @@ pub async fn refresh(
         &matched_token,
         &new_refresh_claims,
         &new_refresh_token,
-        &state.salt
+        &state.salt()
     )
     .await?;
 
@@ -468,7 +468,7 @@ pub async fn logout(
 ) -> Result<(), ValidationError> {
     let hashed_refresh_token = argon2::hash_encoded(
         paylod.refresh_token.as_bytes(),
-        &state.salt.as_bytes(),
+        &state.salt().as_bytes(),
         &Config::default(),
     )
     .map_err(|e| ValidationError {

@@ -42,11 +42,7 @@ async fn main() {
     let pool = connect_to_database().await;
     let salt = env::var("SALT").expect("No salt was provided");
 
-    let connection_db = Arc::new(AppState {
-        users_db: pool.clone(),
-        tokens_db: pool.clone(),
-        salt
-    });
+    let connection_db = Arc::new(AppState::new(pool.clone(), pool.clone(), salt.into()));
 
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
