@@ -39,7 +39,6 @@ pub struct RegisterData {
     pub email: String,
 }
 
-// Кастомная валидация для силы пароля
 fn validate_password_strength(password: &str) -> Result<(), validator::ValidationError> {
     let has_upper = password.chars().any(|c| c.is_uppercase());
     let has_lower = password.chars().any(|c| c.is_lowercase());

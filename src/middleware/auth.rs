@@ -31,7 +31,6 @@ pub async fn auth_middleware(
     let validation = Validation::new(Algorithm::HS256);
 
     let access_key = env::var("SECRET_KEY_ACCESS").expect("SECRET_KEY_ACCESS not provided");
-    // let refresh_key = env::var("SECRET_KEY_REFRESH").expect("SECRET_KEY_REFRESH not provided");
 
     let user_token: TokenData<TokenClaims> = decode::<TokenClaims>(
         token,

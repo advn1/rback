@@ -1,4 +1,4 @@
-use argon2::{self, Config};
+use argon2::{self, Config, hash_encoded, verify_encoded};
 use std::{env, sync::Arc, vec};
 
 use axum::{
@@ -6,7 +6,6 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -68,7 +67,12 @@ pub async fn register(
         });
     }
 
-    let hashed_password = hash(&payload.password, DEFAULT_COST).map_err(|e| ValidationError {
+    let hashed_password = hash_encoded(
+        &payload.password.as_bytes(),
+        &state.salt.as_bytes(),
+        &Config::default(),
+    )
+    .map_err(|e| ValidationError {
         error: "Internal error".to_string(),
         details: vec![ValidationDetail {
             field: "password".to_string(),
@@ -106,42 +110,42 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     req: HeaderMap,
     Json(payload): Json<LoginData>,
-) -> Result<Json<Tokens>, (StatusCode, Json<ValidationError>)> {
+) -> Result<Json<Tokens>, (StatusCode, ValidationError)> {
     if let Some(header_value) = req.get("Authorization") {
         if let Ok(header_str) = header_value.to_str() {
             if header_str.starts_with("Bearer ") {
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(ValidationError {
+                    ValidationError {
                         error: "Authorization error".to_string(),
                         details: vec![ValidationDetail {
                             field: "Authorization".to_string(),
                             messages: vec!["Already authorized".to_string()],
                         }],
-                    }),
+                    },
                 ));
             } else {
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(ValidationError {
+                    ValidationError {
                         error: "Authorization error".to_string(),
                         details: vec![ValidationDetail {
                             field: "Authorization".to_string(),
                             messages: vec!["Not bearer".to_string()],
                         }],
-                    }),
+                    },
                 ));
             }
         } else {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ValidationError {
+                ValidationError {
                     error: "Authorization error".to_string(),
                     details: vec![ValidationDetail {
                         field: "Authorization".to_string(),
                         messages: vec!["Header not valid UTF-8".to_string()],
                     }],
-                }),
+                },
             ));
         }
     }
@@ -157,18 +161,29 @@ pub async fn login(
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ValidationError {
+                ValidationError {
                     error: "Database query failed".to_string(),
                     details: vec![ValidationDetail {
                         field: "email".to_string(),
                         messages: vec![format!("{}", e)],
                     }],
-                }),
+                },
             ));
         }
     };
 
-    let is_correct = verify(&payload.password, &user.password).unwrap();
+    let is_correct = verify_encoded(&user.password, &payload.password.as_bytes()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            ValidationError {
+                error: "User authentication failed".to_string(),
+                details: vec![ValidationDetail {
+                    field: "credentials".to_string(),
+                    messages: vec!["Invalid email or password".to_string()],
+                }],
+            },
+        )
+    })?;
 
     if is_correct {
         let claims = TokenClaims {
@@ -216,26 +231,23 @@ pub async fn login(
 
         let hashed_refresh_token = argon2::hash_encoded(
             refresh_token.as_bytes(),
-            "randomsalt".as_bytes(),
+            &state.salt.as_bytes(),
             &Config::default(),
         )
         .unwrap();
 
-        // let hashed_refresh_token = argon2::hash_encoded(refresh_token, "randomsalt",Argon2::new(algorithm, version, params))
-
-        // Pass claims_refresh to add_token, which contains used:false for the new token
         let _ = add_token(&claims_refresh, &hashed_refresh_token, &state.tokens_db)
             .await
             .map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ValidationError {
+                    ValidationError {
                         error: "Database error".to_string(),
                         details: vec![ValidationDetail {
                             field: "database".to_string(),
                             messages: vec![format!("Failed to add token: {}", e)],
                         }],
-                    }),
+                    },
                 )
             })?;
 
@@ -246,13 +258,13 @@ pub async fn login(
     } else {
         Err((
             StatusCode::BAD_REQUEST,
-            Json(ValidationError {
+            ValidationError {
                 error: "Authentication failed".to_string(),
                 details: vec![ValidationDetail {
                     field: "credentials".to_string(),
                     messages: vec!["Wrong password or email".to_string()],
                 }],
-            }),
+            },
         ))
     }
 }
@@ -275,7 +287,6 @@ pub async fn refresh(
         });
     }
 
-    // Fetch tokens with proper error handling
     let tokens: Vec<DBToken> =
         match sqlx::query_as("SELECT * FROM tokens WHERE user_id = ? AND used = FALSE")
             .bind(&user_data.user_id)
@@ -294,19 +305,17 @@ pub async fn refresh(
             }
         };
 
-    // Find and verify matching token
     let matched_token = find_matching_token(&tokens, &payload.refresh_token)?;
 
-    // Generate new tokens
     let (new_access_token, new_refresh_token, new_refresh_claims) =
         generate_new_tokens(&user_data).await?;
 
-    // Update database in a transaction-like manner
     update_tokens_in_database(
         &state.tokens_db,
         &matched_token,
         &new_refresh_claims,
         &new_refresh_token,
+        &state.salt
     )
     .await?;
 
@@ -341,7 +350,6 @@ fn find_matching_token(
 async fn generate_new_tokens(
     user_data: &TokenClaims,
 ) -> Result<(String, String, TokenClaims), ValidationError> {
-    // Get secret keys with proper error handling
     let access_secret = env::var("SECRET_KEY_ACCESS").map_err(|_| ValidationError {
         error: "Configuration error".to_string(),
         details: vec![ValidationDetail {
@@ -358,7 +366,6 @@ async fn generate_new_tokens(
         }],
     })?;
 
-    // Generate new access token (5 minutes expiry)
     let new_access_claims = TokenClaims {
         name: user_data.name.clone(),
         email: user_data.email.clone(),
@@ -401,7 +408,7 @@ async fn generate_new_tokens(
         error: "Token generation failed".to_string(),
         details: vec![ValidationDetail {
             field: "refresh_token".to_string(),
-            messages: vec![format!("Failed to generate refresh token: {}",e)],
+            messages: vec![format!("Failed to generate refresh token: {}", e)],
         }],
     })?;
 
@@ -413,6 +420,7 @@ async fn update_tokens_in_database(
     matched_token: &DBToken,
     new_refresh_claims: &TokenClaims,
     new_refresh_token: &str,
+    salt: &str
 ) -> Result<(), ValidationError> {
     sqlx::query("UPDATE tokens SET used = TRUE WHERE token = ?")
         .bind(&matched_token.token)
@@ -426,17 +434,19 @@ async fn update_tokens_in_database(
             }],
         })?;
 
-    let salt = generate_random_salt();
-    let hashed_refresh_token =
-        argon2::hash_encoded(new_refresh_token.as_bytes(), &salt, &Config::default()).map_err(
-            |e| ValidationError {
-                error: "Token processing error".to_string(),
-                details: vec![ValidationDetail {
-                    field: "refresh_token".to_string(),
-                    messages: vec![format!("Failed to process refresh token: {}", e)],
-                }],
-            },
-        )?;
+
+    let hashed_refresh_token = argon2::hash_encoded(
+        new_refresh_token.as_bytes(),
+        &salt.as_bytes(),
+        &Config::default(),
+    )
+    .map_err(|e| ValidationError {
+        error: "Token processing error".to_string(),
+        details: vec![ValidationDetail {
+            field: "refresh_token".to_string(),
+            messages: vec![format!("Failed to process refresh token: {}", e)],
+        }],
+    })?;
 
     let _ = add_token(new_refresh_claims, &hashed_refresh_token, db)
         .await
@@ -451,10 +461,6 @@ async fn update_tokens_in_database(
     Ok(())
 }
 
-fn generate_random_salt<'a>() -> &'a [u8] {
-    return "randomsalt".as_bytes();
-}
-
 #[allow(unused)]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
@@ -462,7 +468,7 @@ pub async fn logout(
 ) -> Result<(), ValidationError> {
     let hashed_refresh_token = argon2::hash_encoded(
         paylod.refresh_token.as_bytes(),
-        "randomsalt".as_bytes(),
+        &state.salt.as_bytes(),
         &Config::default(),
     )
     .map_err(|e| ValidationError {

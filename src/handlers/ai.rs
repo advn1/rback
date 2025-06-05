@@ -10,8 +10,6 @@ use crate::{errors::api_errors::GeminiApiErrorWrapper, models::{ai::{AiResponse,
 pub async fn analyze_text(
     Json(payload): Json<Message>,
 ) -> Result<Json<AiResponse>, GeminiApiErrorWrapper> {
-    println!("There");
-
     let text = make_request_to_ai(&payload.msg).await;
 
     match text {

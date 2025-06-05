@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -40,9 +40,12 @@ use tower_http::{
 #[tokio::main]
 async fn main() {
     let pool = connect_to_database().await;
+    let salt = env::var("SALT").expect("No salt was provided");
+
     let connection_db = Arc::new(AppState {
         users_db: pool.clone(),
-        tokens_db: pool.clone(), // Тот же pool
+        tokens_db: pool.clone(),
+        salt
     });
 
     let governor_conf = Arc::new(
@@ -62,7 +65,6 @@ async fn main() {
         .allow_origin(Any)
         .allow_methods(vec![Method::POST, Method::GET]);
 
-    // build our application with a single route
     let app = Router::new()
         .route("/text", get(analyze_text).layer(ai_governor_layer))
         .route("/refresh", post(refresh))
@@ -77,7 +79,6 @@ async fn main() {
     let app: IntoMakeServiceWithConnectInfo<Router, SocketAddr> =
         app.into_make_service_with_connect_info();
 
-    // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4006")
         .await
         .unwrap();
