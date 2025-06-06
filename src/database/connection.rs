@@ -2,7 +2,10 @@ use axum::Json;
 use serde::Serialize;
 use sqlx::{Executor, Pool, Sqlite, sqlite};
 
-use crate::models::{auth::TokenClaims, user::{OnSuccessRegister, UserDB}};
+use crate::models::{
+    auth::TokenClaims,
+    user::{OnSuccessRegister, UserDB},
+};
 
 pub async fn add_user(
     name: &str,
@@ -38,24 +41,28 @@ pub async fn add_user(
 #[allow(unused)]
 pub async fn connect_to_database() -> Pool<Sqlite> {
     let options = sqlite::SqliteConnectOptions::new()
-        .filename("app.db") // Одна база для всего
+        .filename("app.db")
         .create_if_missing(true);
 
     let connection = sqlx::SqlitePool::connect_with(options).await.unwrap();
-    
+
     // let _ = sqlx::query("PRAGMA foreign_keys = ON").execute(&connection).await;
 
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS users (
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
             password TEXT NOT NULL
-        )"
-    ).await.expect("Failed to create users table");
+        )",
+        )
+        .await
+        .expect("Failed to create users table");
 
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS tokens (
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS tokens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token TEXT UNIQUE NOT NULL,
             user_id INTEGER NOT NULL,
@@ -64,8 +71,39 @@ pub async fn connect_to_database() -> Pool<Sqlite> {
             exp INTEGER NOT NULL,
             used BOOL NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"
-    ).await.expect("Failed to create tokens table");
+        )",
+        )
+        .await
+        .expect("Failed to create tokens table");
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+)",
+        )
+        .await
+        .expect("Failed to create conversations table");
+
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    content TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    token_count INTEGER,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+)",
+        )
+        .await
+        .expect("Failed to create messages table");
 
     connection
 }

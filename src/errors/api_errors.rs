@@ -31,3 +31,15 @@ impl IntoResponse for DatabaseError {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
     }
 }
+use thiserror::Error;
+
+use crate::utils::validation::ValidationError;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("Validation failed: {0:?}")]
+    Validation(ValidationError),
+
+    #[error("Validation failed: {0:?}")]
+    Gemini(GeminiApiErrorWrapper)
+}

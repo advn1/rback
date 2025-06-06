@@ -3,13 +3,13 @@ pub mod validation {
     use serde::Serialize;
     use validator::ValidationErrors;
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Debug)]
     pub struct ValidationError {
         pub error: String,
         pub details: Vec<ValidationDetail>,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Debug)]
     pub struct ValidationDetail {
         pub field: String,
         pub messages: Vec<String>,
