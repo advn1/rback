@@ -11,7 +11,7 @@ use axum::{
     Json, Router, debug_handler,
     extract::{
         Query, State, WebSocketUpgrade,
-        ws::{Utf8Bytes, WebSocket},
+        ws::{Message, Utf8Bytes, WebSocket},
     },
     http::Method,
     response::{IntoResponse, Response},
@@ -42,17 +42,13 @@ use tower_governor::{
 mod utils;
 
 use crate::{
-    database::connection::connect_to_database,
-    errors::api_errors::{AppError, GeminiApiError, GeminiApiErrorWrapper},
-    handlers::{
+    database::connection::connect_to_database, errors::api_errors::GeminiApiErrorWrapper, handlers::{
         ai::{
             create_conversation, get_user_conversations, get_user_conversations_by_id,
             update_conversation_by_id,
         },
         auth::{login, logout, refresh, register},
-    },
-    models::{ai::ConvMessage, app::AppState},
-    utils::validation::{ValidationDetail, ValidationError},
+    }, models::{ai::ConvMessage, app::AppState}, utils::validation::{ValidationDetail, ValidationError}
 };
 
 use tower_http::{
@@ -145,7 +141,7 @@ async fn handle_user_message(mut socket: WebSocket, params: UserMessage, state: 
         let msg = if let Ok(msg) = msg {
             let insert = sqlx::query(
                 "INSERT INTO messages (conversation_id, role, content, timestamp, token_count)
-VALUES (?1, 'user', ?2, ?3, 4)",
+        VALUES (?1, 'user', ?2, ?3, 4)",
             )
             .bind(&params.conversation_id)
             .bind(msg.to_text().unwrap())
@@ -163,30 +159,14 @@ VALUES (?1, 'user', ?2, ?3, 4)",
                 })
                 .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
 
-                let _ = socket.send(axum::extract::ws::Message::Text(stringified.into())).await;
+                let _ = socket
+                    .send(axum::extract::ws::Message::Text(stringified.into()))
+                    .await;
             }
-
-            // let r: Vec<ConvMessage> = sqlx::query_as("SELECT * FROM messages")
-            //     .fetch_all(&state.chat_db)
-            //     .await
-            //     .unwrap();
-
-            // println!("WS ON ADDING USER MESSAGE {:?}", r);
 
             let key = env::var("GEMINI_API_KEY").expect("API key was not provided");
-
             let client = Gemini::new(key);
-
-            enum ResponseStatus {
-                NotReady,
-                Ready,
-            }
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-            let (txx, mut rxx) = tokio::sync::mpsc::channel(1);
-
-            let state = state.clone();
-            tokio::spawn(async move {
+            let gemini_response = async {
                 let response = client
                     .generate_content()
                     .with_user_message(msg.to_text().unwrap())
@@ -199,15 +179,17 @@ VALUES (?1, 'user', ?2, ?3, 4)",
                         serde_json::from_str(&e.to_string()[json_start..])
                             .expect("Incorrect GeminiApiError json");
 
-                    let stringified = serde_json::to_string(&new_e).unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());                    
+                    let stringified = serde_json::to_string(&new_e)
+                        .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
+
                 }
 
                 let insert = sqlx::query(
                     "INSERT INTO messages (conversation_id, role, content, timestamp, token_count)
-        VALUES (?1, 'assistant', ?2, ?3, 4)",
+                VALUES (?1, 'assistant', ?2, ?3, 4)",
                 )
                 .bind(&params.conversation_id)
-                .bind(&response.unwrap().clone().text())
+                .bind(&response.as_ref().unwrap().text())
                 .bind(Utc::now().timestamp())
                 .execute(&state.chat_db)
                 .await;
@@ -217,33 +199,42 @@ VALUES (?1, 'user', ?2, ?3, 4)",
                         error: "Database query failed".to_string(),
                         details: vec![ValidationDetail {
                             field: "database".to_string(),
-                            messages: vec!["adding assistant message to database failed".to_string()],
+                            messages: vec![
+                                "adding assistant message to database failed".to_string(),
+                            ],
                         }],
                     })
                     .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
-    
+
+                    return Err(stringified)
                 }
-                // let r: Vec<ConvMessage> = sqlx::query_as("SELECT * FROM messages")
-                // .fetch_all(&state.chat_db)
-                // .await
-                // .unwrap();
 
-                // println!("WS ON ADDING ASSISTANT MESSAGE {:?}", r);
-
-                tx.send(ResponseStatus::Ready).await;
-                txx.send(response.unwrap()).await;
-            });
-
-            loop {
-                tokio::select! {
-                    Some(r) = rxx.recv() => {
-                        socket.send(r.text().into()).await;
-                        break;
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        socket.send("typing..".into()).await;
-                    }
+                enum ResponseStatus {
+                    NotReady,
+                    Ready,
                 }
+
+                Ok((ResponseStatus::Ready, response.unwrap()))
+            };
+
+
+            let typing = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    socket.send("typing".into()).await;
+                }
+            };
+
+            tokio::select! {
+                res = gemini_response => match res {
+                    Ok((status, response)) => {
+                        socket.send(Message::from(response.text())).await;
+                    },
+                    Err(e) => {
+                        socket.send(e.into()).await;
+                    }
+                },
+                never = typing => match never {}
             }
         } else {
             // client disconnected
