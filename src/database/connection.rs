@@ -1,11 +1,12 @@
 use axum::Json;
+use chrono::Utc;
 use serde::Serialize;
 use sqlx::{Executor, Pool, Sqlite, sqlite};
 
-use crate::models::{
+use crate::{models::{
     auth::TokenClaims,
     user::{OnSuccessRegister, UserDB},
-};
+}, utils::validation::{ValidationDetail, ValidationError}};
 
 pub async fn add_user(
     name: &str,
@@ -134,4 +135,37 @@ pub async fn add_token(
     Ok(Json(OnSuccessTokenAdd {
         refresh_token: token.to_string(),
     }))
+}
+
+pub async fn insert_chat_message_to_db(
+    role: &str,
+    conversation_id: i64,
+    msg: &str,
+    exec: &Pool<Sqlite>,
+) -> Result<(), String> {
+    let insert = sqlx::query(
+        "INSERT INTO messages (conversation_id, role, content, timestamp, token_count)
+VALUES (?1, ?2, ?3, ?4, 4)",
+    )
+    .bind(&conversation_id)
+    .bind(role)
+    .bind(msg)
+    .bind(Utc::now().timestamp())
+    .execute(exec)
+    .await;
+
+    if let Err(e) = insert {
+        let stringified = serde_json::to_string(&ValidationError {
+            error: "Database query failed".to_string(),
+            details: vec![ValidationDetail {
+                field: "database".to_string(),
+                messages: vec![format!("adding {} message to database failed: {}", role, e)],
+            }],
+        })
+        .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
+
+        return Err(stringified);
+    }
+
+    Ok(())
 }

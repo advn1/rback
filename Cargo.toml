@@ -3,6 +3,10 @@ name = "rback"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "rback_bin"
+path = "src/main.rs"
+
 [dependencies]
 axum = {version ="0.8.4", features = ["macros", "query", "ws"]}
 gemini-rust = "0.4.2"

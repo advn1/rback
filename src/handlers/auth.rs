@@ -190,7 +190,7 @@ pub async fn login(
             user_id: user.id,
             email: user.email.clone(),
             name: user.name.clone(),
-            exp: (Utc::now() + Duration::minutes(30)).timestamp(),
+            exp: (Utc::now() + Duration::hours(24)).timestamp(),
             token_type: "Access".to_string(),
             used: false,
             jti: Uuid::new_v4().to_string(),
@@ -242,6 +242,8 @@ pub async fn login(
                     },
                 )
             })?;
+
+        println!("SENDING: {:?} {:?}",access_token,refresh_token);
 
         Ok(Json(Tokens {
             access_token,
@@ -299,15 +301,19 @@ pub async fn refresh(
 
     let matched_token = find_matching_token(&tokens, &payload.refresh_token)?;
 
-    let (new_access_token, new_refresh_token, new_refresh_claims) =
-        generate_new_tokens(&user_data, &state.get_access_key().as_bytes(), &state.get_access_key().as_bytes()).await?;
+    let (new_access_token, new_refresh_token, new_refresh_claims) = generate_new_tokens(
+        &user_data,
+        &state.get_access_key().as_bytes(),
+        &state.get_access_key().as_bytes(),
+    )
+    .await?;
 
     update_tokens_in_database(
         &state.tokens_db,
         &matched_token,
         &new_refresh_claims,
         &new_refresh_token,
-        &state.get_salt()
+        &state.get_salt(),
     )
     .await?;
 
@@ -342,13 +348,13 @@ fn find_matching_token(
 async fn generate_new_tokens(
     user_data: &TokenClaims,
     access_key: &[u8],
-    refresh_key: &[u8]
+    refresh_key: &[u8],
 ) -> Result<(String, String, TokenClaims), ValidationError> {
     let new_access_claims = TokenClaims {
         name: user_data.name.clone(),
         email: user_data.email.clone(),
         user_id: user_data.user_id,
-        exp: (Utc::now() + Duration::minutes(30)).timestamp(),
+        exp: (Utc::now() + Duration::hours(24)).timestamp(),
         token_type: "Access".to_string(),
         used: false,
         jti: Uuid::new_v4().to_string(),
@@ -398,7 +404,7 @@ async fn update_tokens_in_database(
     matched_token: &DBToken,
     new_refresh_claims: &TokenClaims,
     new_refresh_token: &str,
-    salt: &str
+    salt: &str,
 ) -> Result<(), ValidationError> {
     sqlx::query("UPDATE tokens SET used = TRUE WHERE token = ?")
         .bind(&matched_token.token)
@@ -411,7 +417,6 @@ async fn update_tokens_in_database(
                 messages: vec![format!("Failed to invalidate old token: {}", e)],
             }],
         })?;
-
 
     let hashed_refresh_token = argon2::hash_encoded(
         new_refresh_token.as_bytes(),

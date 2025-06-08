@@ -1,21 +1,9 @@
-use std::{
-    collections::HashMap,
-    env,
-    net::SocketAddr,
-    sync::{Arc, mpsc::channel},
-    thread,
-    time::Duration,
-};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
-    Json, Router, debug_handler,
-    extract::{
-        Query, State, WebSocketUpgrade,
-        ws::{Message, Utf8Bytes, WebSocket},
-    },
+    Router,
     http::Method,
-    response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
@@ -28,27 +16,27 @@ mod errors;
 mod database;
 
 mod middleware;
-use chrono::Utc;
-use gemini_rust::{Gemini, GenerationResponse};
 use middleware::auth::auth_middleware;
 
 mod handlers;
 use handlers::ai::analyze_text;
-use serde::Deserialize;
-use tower::{ServiceBuilder, layer::util::Stack};
+use tower::ServiceBuilder;
 use tower_governor::{
     GovernorLayer, governor::GovernorConfigBuilder, key_extractor::PeerIpKeyExtractor,
 };
 mod utils;
 
 use crate::{
-    database::connection::connect_to_database, errors::api_errors::GeminiApiErrorWrapper, handlers::{
+    database::connection::connect_to_database,
+    handlers::{
         ai::{
-            create_conversation, get_user_conversations, get_user_conversations_by_id,
-            update_conversation_by_id,
+            create_conversation, delete_conversation_by_id, delete_message_by_id,
+            get_conversation_messages_by_id, get_user_conversations, get_user_conversations_by_id,
+            post_user_message, update_conversation_by_id,
         },
         auth::{login, logout, refresh, register},
-    }, models::{ai::ConvMessage, app::AppState}, utils::validation::{ValidationDetail, ValidationError}
+    },
+    models::app::AppState,
 };
 
 use tower_http::{
@@ -88,7 +76,8 @@ async fn main() {
 
     let cors_layer = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(vec![Method::POST, Method::GET]);
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/text", get(analyze_text).layer(ai_governor_layer))
@@ -96,18 +85,28 @@ async fn main() {
             "/conversations",
             get(get_user_conversations).post(create_conversation),
         )
-        // .route(
-        //     "/conversations/{id}",
-        //     get(get_user_conversations_by_id).put(update_conversation_by_id),
-        // )
-        .route("/conversations_ws", any(post_user_message))
+        .route(
+            "/conversations/{id}",
+            get(get_user_conversations_by_id)
+                .put(update_conversation_by_id)
+                .delete(delete_conversation_by_id),
+        )
+        .route(
+            "/conversations/{id}/messages/{message_id}",
+            delete(delete_message_by_id),
+        )
+        .route(
+            "/conversations/{id}/messages",
+            get(get_conversation_messages_by_id),
+        )
         .layer(axum_middleware::from_fn(auth_middleware))
         .route("/refresh", post(refresh))
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/logout", post(logout))
+        .route("/conversations_ws", get(post_user_message))
+
         .layer(ServiceBuilder::new().layer(cors_layer))
-        .layer(TraceLayer::new_for_http())
         .with_state(connection_db);
 
     let app: IntoMakeServiceWithConnectInfo<Router, SocketAddr> =
@@ -120,124 +119,4 @@ async fn main() {
     println!("listening to 4006");
 
     axum::serve(listener, app).await.unwrap();
-}
-
-#[derive(Deserialize, Debug)]
-struct UserMessage {
-    conversation_id: i64,
-}
-
-#[debug_handler]
-async fn post_user_message(
-    State(state): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-    Query(params): Query<UserMessage>,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_user_message(socket, params, state))
-}
-
-async fn handle_user_message(mut socket: WebSocket, params: UserMessage, state: Arc<AppState>) {
-    while let Some(msg) = socket.recv().await {
-        let msg = if let Ok(msg) = msg {
-            let insert = sqlx::query(
-                "INSERT INTO messages (conversation_id, role, content, timestamp, token_count)
-        VALUES (?1, 'user', ?2, ?3, 4)",
-            )
-            .bind(&params.conversation_id)
-            .bind(msg.to_text().unwrap())
-            .bind(Utc::now().timestamp())
-            .execute(&state.chat_db)
-            .await;
-
-            if let Err(e) = insert {
-                let stringified = serde_json::to_string(&ValidationError {
-                    error: "Database query failed".to_string(),
-                    details: vec![ValidationDetail {
-                        field: "database".to_string(),
-                        messages: vec!["adding user message to database failed".to_string()],
-                    }],
-                })
-                .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
-
-                let _ = socket
-                    .send(axum::extract::ws::Message::Text(stringified.into()))
-                    .await;
-            }
-
-            let key = env::var("GEMINI_API_KEY").expect("API key was not provided");
-            let client = Gemini::new(key);
-            let gemini_response = async {
-                let response = client
-                    .generate_content()
-                    .with_user_message(msg.to_text().unwrap())
-                    .execute()
-                    .await;
-
-                if let Err(e) = &response {
-                    let json_start = e.to_string().find("{").expect("Not a pure json");
-                    let new_e: GeminiApiErrorWrapper =
-                        serde_json::from_str(&e.to_string()[json_start..])
-                            .expect("Incorrect GeminiApiError json");
-
-                    let stringified = serde_json::to_string(&new_e)
-                        .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
-
-                }
-
-                let insert = sqlx::query(
-                    "INSERT INTO messages (conversation_id, role, content, timestamp, token_count)
-                VALUES (?1, 'assistant', ?2, ?3, 4)",
-                )
-                .bind(&params.conversation_id)
-                .bind(&response.as_ref().unwrap().text())
-                .bind(Utc::now().timestamp())
-                .execute(&state.chat_db)
-                .await;
-
-                if let Err(e) = insert {
-                    let stringified = serde_json::to_string(&ValidationError {
-                        error: "Database query failed".to_string(),
-                        details: vec![ValidationDetail {
-                            field: "database".to_string(),
-                            messages: vec![
-                                "adding assistant message to database failed".to_string(),
-                            ],
-                        }],
-                    })
-                    .unwrap_or_else(|_| "{\"error\": \"Internal server error\"}".to_string());
-
-                    return Err(stringified)
-                }
-
-                enum ResponseStatus {
-                    NotReady,
-                    Ready,
-                }
-
-                Ok((ResponseStatus::Ready, response.unwrap()))
-            };
-
-
-            let typing = async {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    socket.send("typing".into()).await;
-                }
-            };
-
-            tokio::select! {
-                res = gemini_response => match res {
-                    Ok((status, response)) => {
-                        socket.send(Message::from(response.text())).await;
-                    },
-                    Err(e) => {
-                        socket.send(e.into()).await;
-                    }
-                },
-                never = typing => match never {}
-            }
-        } else {
-            // client disconnected
-        };
-    }
 }
